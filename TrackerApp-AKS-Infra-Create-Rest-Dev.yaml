@@ -1,0 +1,204 @@
+trigger:
+- main
+
+resources:
+  pipelines:
+  - pipeline: TrackerApp-AKS-Infra-Create_Trigger
+    source: TrackerApp-AKS-Infra-Create-Dev
+    project: trackeraks
+    trigger: true
+
+pool:
+  name: Default
+  demands:
+   - agent.name -equals ado-agent1-vm 
+
+variables:
+- group: dev_variables
+
+stages:     
+- stage: ModifyFiles
+  jobs:
+    - job: ModifyFilesJob
+      continueOnError: false
+      steps:
+      - task: Bash@3
+        displayName: Changing SonarQube Service Type from ClusterIP to LoadBalancer
+        inputs:
+          targetType: 'inline'
+          script: |
+            sleep 60
+            rm -rf /home/azdoagent/.kube/config #only needed if kubeconfig updation creates conflicts, this is specific to my pipeline agent, may not be neccessary for others.
+            #kubectl config view
+            #echo "############"
+            echo y | az aks get-credentials --name $(aks_cluster_name) --resource-group $(devops_rg_name)
+            #echo "***********"
+            #kubectl config view
+            #kubectl config current-context
+            #kubectl -n argocd get pods
+            kubectl -n sonarqube patch svc sonarqube-sonarqube -p '{"spec": {"type": "LoadBalancer"}}' 
+      - task: KubernetesManifest@0
+        displayName: Create Argo CD Image Updater Secret For Pulling Images in default NS
+        inputs:
+          action: 'createSecret'
+          kubernetesServiceConnection: '$(aksServiceConnection)'
+          namespace: 'default'
+          secretType: 'dockerRegistry'
+          secretName: '$(imagePullSecret)'
+          dockerRegistryEndpoint: '$(dockerRegistryServiceConnection)'
+      - task: KubernetesManifest@0
+        displayName: Create Argo CD Image Updater Secret For Pushing GIT tags
+        inputs:
+          action: 'createSecret'
+          kubernetesServiceConnection: '$(aksServiceConnection)'
+          namespace: 'argocd'
+          secretType: 'dockerRegistry'
+          secretName: 'azuredeveops-acr-secret-pipeline'
+          dockerRegistryEndpoint: '$(dockerRegistryServiceConnection)'
+
+      - task: KubernetesManifest@0
+        displayName: Create Argo CD Image Updater Secret For Pulling Images in argocd ns
+        inputs:
+          action: 'createSecret'
+          kubernetesServiceConnection: '$(aksServiceConnection)'
+          namespace: 'argocd'
+          secretType: 'generic'
+          secretName: 'azuredeveops-repo-pipeline'
+          secretArguments: '--from-literal=username=argocd --from-literal=password=$(personal_access_token)'
+      - task: Bash@3
+        displayName: Create Azure DevOpsRepo To ArgoCD Mapping Secret
+        inputs:
+          targetType: 'inline'
+          script: |
+            #echo "############"
+            #echo y | az aks get-credentials --name $(aks_cluster_name) --resource-group $(devops_rg_name)
+            #echo "***********"
+            echo url='https://$(devops_org_name)@dev.azure.com/$(devops_org_name)/$(devops_prj_name)/_git/trackerapp-k8s-manifests' >> tempfile.txt
+            echo password='$(personal_access_token)' >> tempfile.txt
+            echo username='argocd' >> tempfile.txt
+            kubectl -n argocd create secret generic azuredeveops-repo --from-env-file=tempfile.txt
+            kubectl -n argocd label secret azuredeveops-repo "argocd.argoproj.io/secret-type=repository"
+      - task: Bash@3
+        displayName: Update Argo CD Image Updater, Reconciliation ConfigMap & SVC
+        inputs:
+          targetType: 'inline'
+          script: |
+            sleep 60
+            #kubectl config view
+            #echo "############"
+            #echo y | az aks get-credentials --name $(aks_cluster_name) --resource-group $(devops_rg_name)
+            #echo "***********"
+            kubectl -n argocd patch svc argocd-server -p '{"spec": {"type": "LoadBalancer"}}' 
+            kubectl -n argocd patch configmap argocd-cm -p '{"data": {"timeout.reconciliation": "1s"}}' 
+            kubectl -n argocd patch configmap argocd-image-updater-config -p '{ "data": { "argocd.grpc_web": "true", "argocd.insecure": "false", "argocd.plaintext": "false", "kube.events": "false", "log.level": "debug", "registries.conf": "registries:\n- name: Azure Container Registry\n  prefix: $(acr_reg_name).azurecr.io\n  api_url: https://$(acr_reg_name).azurecr.io\n  credentials: pullsecret:argocd/azuredeveops-acr-secret-pipeline\n" }}'
+            kubectl -n argocd patch deployment argocd-application-controller -p '{ "spec": {  "template": {  "spec": { "containers": [ { "name": "application-controller", "env": [ { "name": "ARGOCD_RECONCILIATION_TIMEOUT",  "value": "1s" }, {  "name": "ARGOCD_HARD_RECONCILIATION_TIMEOUT",  "value": "1s" } ] } ] } } } }'
+            kubectl -n argocd rollout restart deployment updater-argocd-image-updater
+            kubectl -n argocd rollout restart deploy argocd-repo-server                       
+      - task: Bash@3
+        displayName: Deploy Istio & its Integrations/Addons
+        inputs:
+          targetType: 'inline'
+          script: |
+            #kubectl config view
+            #echo "############"
+            #echo y | az aks get-credentials --name $(aks_cluster_name) --resource-group $(devops_rg_name)
+            #echo "***********"
+            sleep 60
+
+            curl -L https://istio.io/downloadIstio | sh -
+            cd istio-1.19.0
+            export PATH=$PWD/bin:$PATH
+            istioctl install --set profile=demo -y
+            kubectl apply -f samples/addons
+            kubectl apply -f samples/bookinfo/platform/kube/bookinfo.yaml           
+            sed "s/REPLACEPIBLICIP/$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')/g" ../terraform_manifests/yamls/kiali-ingress.yaml > kiali-ingress.yaml
+            kubectl apply -f kiali-ingress.yaml
+            kubectl -n istio-system patch svc prometheus -p '{"spec": {"type": "LoadBalancer"}}' 
+            kubectl -n istio-system patch svc grafana -p '{"spec": {"type": "LoadBalancer"}}'
+            kubectl -n istio-system patch svc kiali -p '{"spec": {"type": "LoadBalancer"}}'
+            kubectl label namespace default istio-injection=enabled
+            kubectl label namespace argocd istio-injection=enabled      
+      - task: Bash@3
+        displayName: Istio Virtual Service and Gateway Deploy
+        inputs:
+          targetType: 'inline'
+          script: |
+            # sed -e 's/TENANTID/$(tenant_id)/g' -e 's/SUBID/$(subscription_id)/' -e 's/RESGRPNAME/$(devops_rg_name)/' -e 's/CLIENTID/$(client_id)/' terraform_manifests/yamls/azure.json > azure.json
+            # kubectl create secret generic azure-config-file --from-file=azure.json
+            # kubectl apply -f terraform_manifests/yamls/external-dns.yaml
+            # sleep 30
+            # kubectl logs -f $(kubectl get po | egrep -o 'external-dns[A-Za-z0-9-]+')
+            sed -e 's/DOMAINNAME/$(domain_name)/g' terraform_manifests/yamls/ingressgw.yaml > ingressgw.yaml
+            kubectl -n default apply -f ingressgw.yaml            
+- stage: UpdateDNSRecords
+  jobs:
+    - job: UpdateDNSRecordsJob
+      continueOnError: false
+      steps:
+      - task: AzureCLI@2
+        displayName: Update Variable Group with Build ID Tag
+        inputs:
+          azureSubscription: 'Azure subscription 1(37565286-71fe-4f4d-bde1-8f99918e786a)'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |        
+            az extension add --name azure-devops
+            az config set extension.use_dynamic_install=yes_without_prompt
+            echo $(System.AccessToken) | az devops login
+            #echo "public ip--->>>>"$(kubectl -n istio-system get svc istio-ingressgateway  -o json | jq .status.loadBalancer.ingress[0].ip -r)
+            az pipelines variable-group variable update --group-id $(az pipelines variable-group list --group-name $(current_env)_variables --query '[0].id' -o json) --name istio_public_ip --value $(kubectl -n istio-system get svc istio-ingressgateway  -o json | jq .status.loadBalancer.ingress[0].ip -r)      
+            sleep 60  # Time to update the variable group variable istio_public_ip value
+      - task: TerraformCLI@0
+        displayName: Terraform Init
+        inputs:
+          command: 'init'
+          commandOptions: '-reconfigure -var aks_cluster_name="$(aks_cluster_name)" -var istio_public_ip="$(istio_public_ip)"  -var domain_name="$(domain_name)" -var client_id="$(client_id)" -var client_secret="$(client_secret)"   -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)"'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          backendType: 'azurerm'
+          backendServiceArm: $(azrm_svc_conn)
+          backendAzureRmResourceGroupName: $(backend_azure_rg_name)
+          backendAzureRmResourceGroupLocation: $(devops_rg_location)
+          backendAzureRmStorageAccountName: $(backend_azure_storgaccnt_name)
+          backendAzureRmContainerName: $(backend_azure_cont_name)
+          backendAzureRmKey: '$(current_env)/k8smisc/trackerapp-azure-$(current_env).tfstate'
+          allowTelemetryCollection: false
+          ensureBackend: true      
+      - task: TerraformCLI@0
+        displayName: Terraform Validate
+        inputs:
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          allowTelemetryCollection: false            
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Create $(current_env)
+        inputs:
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'       
+          command: 'workspace'
+          workspaceSubCommand: 'new'
+          workspaceName: $(current_env)
+          allowTelemetryCollection: false
+          skipExistingWorkspace: true          
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Select $(current_env)
+        inputs:
+          command: 'workspace'
+          workspaceSubCommand: select    
+          workspaceName: '$(current_env)'                
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          allowTelemetryCollection: false                
+      - task: TerraformCLI@0
+        displayName: Terraform Plan
+        inputs:
+          command: 'plan'         
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '-var aks_cluster_name="$(aks_cluster_name)" -var istio_public_ip="$(istio_public_ip)" -var domain_name="$(domain_name)" -var client_id="$(client_id)" -var client_secret="$(client_secret)" -var org_service_url="$(org_service_url)" -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)" -out $(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false                    
+      - task: TerraformCLI@0
+        displayName: Terraform Apply
+        inputs:
+          command: 'apply'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false            

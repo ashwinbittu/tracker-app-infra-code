@@ -1,0 +1,324 @@
+trigger:
+- main
+
+pool:
+  name: Default
+  demands:
+   - agent.name -equals ado-agent1-vm 
+
+variables:
+- group: prod_variables
+
+stages:
+- stage: CreateSSHKeys
+  jobs:
+    - job: CreateSSHKeysJob
+      continueOnError: false
+      steps:
+      - task: Bash@3
+        inputs:
+          targetType: 'inline'
+          script: |
+              ls -rtl
+              ls -rtl terraform_manifests
+              echo $(current_env) $(devops_prj_name)-vault
+              ls -rtl terraform_manifests/scripts              
+              chmod +x  terraform_manifests/scripts/aks_key_pair.sh
+              sudo apt-get install dos2unix -y
+              dos2unix  terraform_manifests/scripts/aks_key_pair.sh
+              bash terraform_manifests/scripts/aks_key_pair.sh $(current_env) $(devops_prj_name)-vault
+- stage: CreateResourceGroup
+  jobs:
+    - job: CreateResourceGroupJob
+      continueOnError: false
+      steps:
+      - task: TerraformCLI@0
+        displayName: Terraform Init
+        inputs:
+          command: 'init'
+          commandOptions: '-reconfigure -var client_id="$(client_id)" -var client_secret="$(client_secret)" -var org_service_url="$(org_service_url)" -var acr_reg_name="$(acr_reg_name)" -var acr_reg_sku="$(acr_reg_sku)"   -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var backend_azure_rg_name=$(backend_azure_rg_name) -var backend_azure_storgaccnt_name=$(backend_azure_storgaccnt_name) -var backend_azure_cont_name=$(backend_azure_cont_name) -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)"'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/resourcegroup'
+          backendType: 'azurerm'
+          backendServiceArm: $(azrm_svc_conn)
+          backendAzureRmResourceGroupName: $(backend_azure_rg_name)
+          backendAzureRmResourceGroupLocation: $(devops_rg_location)
+          backendAzureRmStorageAccountName: $(backend_azure_storgaccnt_name)
+          backendAzureRmContainerName: $(backend_azure_cont_name)
+          backendAzureRmKey: '$(current_env)/rg/trackerapp-azure-$(current_env).tfstate'
+          allowTelemetryCollection: false
+          ensureBackend: true      
+      - task: TerraformCLI@0
+        displayName: Terraform Validate
+        inputs:
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/resourcegroup'
+          allowTelemetryCollection: false            
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Create $(current_env)
+        inputs:
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/resourcegroup'       
+          command: 'workspace'
+          workspaceSubCommand: 'new'
+          workspaceName: $(current_env)
+          allowTelemetryCollection: false
+          skipExistingWorkspace: true          
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Select $(current_env)
+        inputs:
+          command: 'workspace'
+          workspaceSubCommand: select    
+          workspaceName: '$(current_env)'                
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/resourcegroup'
+          allowTelemetryCollection: false                
+      - task: TerraformCLI@0
+        displayName: Terraform Plan
+        inputs:
+          command: 'plan'         
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/resourcegroup'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '-var client_id="$(client_id)" -var client_secret="$(client_secret)" -var org_service_url="$(org_service_url)" -var acr_reg_name="$(acr_reg_name)" -var acr_reg_sku="$(acr_reg_sku)"   -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var backend_azure_rg_name=$(backend_azure_rg_name) -var backend_azure_storgaccnt_name=$(backend_azure_storgaccnt_name) -var backend_azure_cont_name=$(backend_azure_cont_name) -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)" -out $(System.DefaultWorkingDirectory)/terraform_manifests/resourcegroup/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false                    
+      - task: TerraformCLI@0
+        displayName: Terraform Apply
+        inputs:
+          command: 'apply'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/resourcegroup'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '$(System.DefaultWorkingDirectory)/terraform_manifests/resourcegroup/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false                              
+- stage: CreateVNET
+  jobs:
+    - job: CreateVNETJob
+      continueOnError: false
+      steps:
+      - task: TerraformCLI@0
+        displayName: Terraform Init
+        inputs:
+          command: 'init'
+          commandOptions: '-reconfigure -var vnet_name="$(vnet_name)" -var region=$(region) -var client_id="$(client_id)" -var client_secret="$(client_secret)"   -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)"'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/network'
+          backendType: 'azurerm'
+          backendServiceArm: $(azrm_svc_conn)
+          backendAzureRmResourceGroupName: $(backend_azure_rg_name)
+          backendAzureRmResourceGroupLocation: $(devops_rg_location)
+          backendAzureRmStorageAccountName: $(backend_azure_storgaccnt_name)
+          backendAzureRmContainerName: $(backend_azure_cont_name)
+          backendAzureRmKey: '$(current_env)/vnet/trackerapp-azure-$(current_env).tfstate'
+          allowTelemetryCollection: false
+          ensureBackend: true      
+      - task: TerraformCLI@0
+        displayName: Terraform Validate
+        inputs:
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/network'
+          allowTelemetryCollection: false
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Create $(current_env)
+        inputs:
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/network'       
+          command: 'workspace'
+          workspaceSubCommand: 'new'
+          workspaceName: $(current_env)
+          allowTelemetryCollection: false
+          skipExistingWorkspace: true
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Select $(current_env)
+        inputs:
+          command: 'workspace'
+          workspaceSubCommand: select    
+          workspaceName: '$(current_env)'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/network'
+          allowTelemetryCollection: false
+      - task: TerraformCLI@0
+        displayName: Terraform Plan
+        inputs:
+          command: 'plan'         
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/network'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '-var vnet_name="$(vnet_name)" -var region=$(region) -var client_id="$(client_id)" -var client_secret="$(client_secret)" -var org_service_url="$(org_service_url)" -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)" -out $(System.DefaultWorkingDirectory)/terraform_manifests/network/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false
+      - task: TerraformCLI@0
+        displayName: Terraform Apply
+        inputs:
+          command: 'apply'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/network'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '$(System.DefaultWorkingDirectory)/terraform_manifests/network/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false
+- stage: CreateAKS
+  jobs:
+    - job: CreateAKSJob
+      continueOnError: false
+      steps:
+      - task: TerraformCLI@0
+        displayName: Terraform Init
+        inputs:
+          command: 'init'
+          commandOptions: '-reconfigure -var aks_cluster_name="$(aks_cluster_name)" -var vnet_name="$(vnet_name)" -var region=$(region) -var aks_cluster_dnprfx_name="$(aks_cluster_dnprfx_name)" -var client_id="$(client_id)" -var client_secret="$(client_secret)" -var org_service_url="$(org_service_url)" -var acr_reg_name="$(acr_reg_name)" -var acr_reg_sku="$(acr_reg_sku)"   -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var backend_azure_rg_name=$(backend_azure_rg_name) -var backend_azure_storgaccnt_name=$(backend_azure_storgaccnt_name) -var backend_azure_cont_name=$(backend_azure_cont_name) -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)"'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests'
+          backendType: 'azurerm'
+          backendServiceArm: $(azrm_svc_conn)
+          backendAzureRmResourceGroupName: $(backend_azure_rg_name)
+          backendAzureRmResourceGroupLocation: $(devops_rg_location)
+          backendAzureRmStorageAccountName: $(backend_azure_storgaccnt_name)
+          backendAzureRmContainerName: $(backend_azure_cont_name)
+          backendAzureRmKey: '$(current_env)/aks/trackerapp-azure-$(current_env).tfstate'
+          allowTelemetryCollection: false
+          ensureBackend: true      
+      - task: TerraformCLI@0
+        displayName: Terraform Validate
+        inputs:
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests'
+          allowTelemetryCollection: false            
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Create $(current_env)
+        inputs:
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests'       
+          command: 'workspace'
+          workspaceSubCommand: 'new'
+          workspaceName: $(current_env)
+          allowTelemetryCollection: false
+          skipExistingWorkspace: true          
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Select $(current_env)
+        inputs:
+          command: 'workspace'
+          workspaceSubCommand: select    
+          workspaceName: '$(current_env)'                
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests'
+          allowTelemetryCollection: false                
+      - task: TerraformCLI@0
+        displayName: Terraform Plan
+        inputs:
+          command: 'plan'         
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '-var aks_cluster_name="$(aks_cluster_name)" -var vnet_name="$(vnet_name)" -var region=$(region) -var aks_cluster_dnprfx_name="$(aks_cluster_dnprfx_name)" -var client_id="$(client_id)" -var client_secret="$(client_secret)" -var org_service_url="$(org_service_url)" -var acr_reg_name="$(acr_reg_name)" -var acr_reg_sku="$(acr_reg_sku)"   -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var backend_azure_rg_name=$(backend_azure_rg_name) -var backend_azure_storgaccnt_name=$(backend_azure_storgaccnt_name) -var backend_azure_cont_name=$(backend_azure_cont_name) -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)" -out $(System.DefaultWorkingDirectory)/terraform_manifests/aks/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false                    
+      - task: TerraformCLI@0
+        displayName: Terraform Apply
+        inputs:
+          command: 'apply'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '$(System.DefaultWorkingDirectory)/terraform_manifests/aks/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false
+- stage: CreateServiceConnections
+  jobs:
+    - job: CreateServiceConnectionsJob
+      continueOnError: false
+      steps:
+      - task: TerraformCLI@0
+        displayName: Terraform Init
+        inputs:
+          command: 'init'
+          commandOptions: '-reconfigure -var acr_endpoint="$(dockerRegistryServiceConnection)" -var aks_endpoint=$(aksServiceConnection) -var aks_cluster_name="$(aks_cluster_name)" -var vnet_name="$(vnet_name)" -var region=$(region) -var client_id="$(client_id)" -var client_secret="$(client_secret)"   -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)"'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/serviceconns'
+          backendType: 'azurerm'
+          backendServiceArm: $(azrm_svc_conn)
+          backendAzureRmResourceGroupName: $(backend_azure_rg_name)
+          backendAzureRmResourceGroupLocation: $(devops_rg_location)
+          backendAzureRmStorageAccountName: $(backend_azure_storgaccnt_name)
+          backendAzureRmContainerName: $(backend_azure_cont_name)
+          backendAzureRmKey: '$(current_env)/serviceconns/trackerapp-azure-$(current_env).tfstate'
+          allowTelemetryCollection: false
+          ensureBackend: true
+      - task: TerraformCLI@0
+        displayName: Terraform Validate
+        inputs:
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/serviceconns'
+          allowTelemetryCollection: false
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Create $(current_env)
+        inputs:
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/serviceconns'       
+          command: 'workspace'
+          workspaceSubCommand: 'new'
+          workspaceName: $(current_env)
+          allowTelemetryCollection: false
+          skipExistingWorkspace: true
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Select $(current_env)
+        inputs:
+          command: 'workspace'
+          workspaceSubCommand: select
+          workspaceName: '$(current_env)'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/serviceconns'
+          allowTelemetryCollection: false
+      - task: TerraformCLI@0
+        displayName: Terraform Plan
+        inputs:
+          command: 'plan'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/serviceconns'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '-var acr_endpoint="$(dockerRegistryServiceConnection)" -var aks_endpoint=$(aksServiceConnection) -var vnet_name="$(vnet_name)" -var region=$(region) -var aks_cluster_name="$(aks_cluster_name)" -var aks_cluster_dnprfx_name="$(aks_cluster_dnprfx_name)" -var backend_azure_rg_name=$(backend_azure_rg_name) -var backend_azure_storgaccnt_name=$(backend_azure_storgaccnt_name) -var backend_azure_cont_name=$(backend_azure_cont_name) -var client_id="$(client_id)" -var client_secret="$(client_secret)"  -var acr_reg_name="$(acr_reg_name)" -var acr_reg_sku="$(acr_reg_sku)"  -var org_service_url="$(org_service_url)" -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)" -out $(System.DefaultWorkingDirectory)/terraform_manifests/serviceconns/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false
+      - task: TerraformCLI@0
+        displayName: Terraform Apply
+        inputs:
+          command: 'apply'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/serviceconns'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '$(System.DefaultWorkingDirectory)/terraform_manifests/serviceconns/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false
+- stage: DeployArgocdIstioSonar
+  jobs:
+    - job: DeployArgocdIstioSonarJob
+      continueOnError: false
+      steps:
+      - task: TerraformCLI@0
+        displayName: Terraform Init
+        inputs:
+          command: 'init'
+          commandOptions: '-reconfigure -var aks_cluster_name="$(aks_cluster_name)" -var client_id="$(client_id)" -var client_secret="$(client_secret)"   -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)"'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          backendType: 'azurerm'
+          backendServiceArm: $(azrm_svc_conn)
+          backendAzureRmResourceGroupName: $(backend_azure_rg_name)
+          backendAzureRmResourceGroupLocation: $(devops_rg_location)
+          backendAzureRmStorageAccountName: $(backend_azure_storgaccnt_name)
+          backendAzureRmContainerName: $(backend_azure_cont_name)
+          backendAzureRmKey: '$(current_env)/k8smisc/trackerapp-azure-$(current_env).tfstate'
+          allowTelemetryCollection: false
+          ensureBackend: true      
+      - task: TerraformCLI@0
+        displayName: Terraform Validate
+        inputs:
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          allowTelemetryCollection: false            
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Create $(current_env)
+        inputs:
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'       
+          command: 'workspace'
+          workspaceSubCommand: 'new'
+          workspaceName: $(current_env)
+          allowTelemetryCollection: false
+          skipExistingWorkspace: true          
+      - task: TerraformCLI@0
+        displayName: Terraform Workspace Select $(current_env)
+        inputs:
+          command: 'workspace'
+          workspaceSubCommand: select    
+          workspaceName: '$(current_env)'                
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          allowTelemetryCollection: false                
+      - task: TerraformCLI@0
+        displayName: Terraform Plan
+        inputs:
+          command: 'plan'         
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '-var aks_cluster_name="$(aks_cluster_name)" -var client_id="$(client_id)" -var client_secret="$(client_secret)" -var org_service_url="$(org_service_url)" -var environment="$(current_env)" -var devops_rg_location="$(devops_rg_location)" -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)" -out $(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false                    
+      - task: TerraformCLI@0
+        displayName: Terraform Apply
+        inputs:
+          command: 'apply'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '$(System.DefaultWorkingDirectory)/terraform_manifests/k8smisc/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false

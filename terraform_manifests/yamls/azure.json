@@ -1,0 +1,7 @@
+{
+  "tenantId": "TENANTID",
+  "subscriptionId": "SUBID",
+  "resourceGroup": "RESGRPNAME", 
+  "useManagedIdentityExtension": true,
+  "userAssignedIdentityID": "CLIENTID"
+}

@@ -1,0 +1,68 @@
+trigger:
+- main
+
+pool:
+  name: Default
+  demands:
+   - agent.name -equals ado-agent1-vm 
+
+variables:
+- group: dev_variables
+
+stages:
+- stage: DestroyBackEnd
+  jobs:
+    - job: DestroyBackEndJob
+      continueOnError: false
+      steps:
+      - task: TerraformCLI@0
+        displayName: Terraform Init
+        inputs:
+          command: 'init'
+          commandOptions: '-reconfigure -var devops_rg_location="$(devops_rg_location)" -var environment="$(current_env)" -var backend_azure_rg_name=$(backend_azure_rg_name) -var backend_azure_storgaccnt_name=$(backend_azure_storgaccnt_name) -var backend_azure_cont_name=$(backend_azure_cont_name) -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)"'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/foundation'
+          backendType: 'azurerm'
+          backendServiceArm: $(azrm_svc_conn)
+          backendAzureRmResourceGroupName: $(backend_azure_rg_name)
+          backendAzureRmResourceGroupLocation: $(devops_rg_location)
+          backendAzureRmStorageAccountName: $(backend_azure_storgaccnt_name)
+          backendAzureRmContainerName: $(backend_azure_cont_name)
+          backendAzureRmKey: 'foundation/trackerapp-azure.tfstate'
+          allowTelemetryCollection: false
+          ensureBackend: true      
+      - task: TerraformCLI@0
+        displayName: Terraform Validate
+        inputs:
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/foundation'
+          allowTelemetryCollection: false                  
+      - task: TerraformCLI@0
+        displayName: Terraform Plan
+        inputs:
+          command: 'plan'         
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/foundation'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '-var devops_rg_location="$(devops_rg_location)" -var environment="$(current_env)" -var backend_azure_rg_name=$(backend_azure_rg_name) -var backend_azure_storgaccnt_name=$(backend_azure_storgaccnt_name) -var backend_azure_cont_name=$(backend_azure_cont_name) -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)" -out $(System.DefaultWorkingDirectory)/terraform_manifests/foundation/foundation-$(Build.BuildId).out'
+          allowTelemetryCollection: false                    
+      - task: TerraformCLI@0
+        displayName: Terraform Destroy
+        inputs:
+          command: 'destroy'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform_manifests/foundation'
+          environmentServiceName: $(azrm_svc_conn)
+          commandOptions: '-var devops_rg_location="$(devops_rg_location)" -var environment="$(current_env)" -var backend_azure_rg_name=$(backend_azure_rg_name) -var backend_azure_storgaccnt_name=$(backend_azure_storgaccnt_name) -var backend_azure_cont_name=$(backend_azure_cont_name) -var devops_rg_name=$(devops_rg_name) -var devops_prj_name=$(devops_prj_name) -var personal_access_token=$(personal_access_token) -var org_service_url=$(org_service_url) -var tenant_id=$(tenant_id) -var subscription_id=$(subscription_id) -var subscription_name="$(subscription_name)"'
+          allowTelemetryCollection: false
+- stage: DeleteBackend
+  jobs:
+    - job: DeleteBackendJob
+      continueOnError: false
+      steps:
+      - task: Bash@3
+        displayName: Delete Backend
+        inputs:
+          targetType: 'inline'
+          script: |
+            sleep 60
+            echo y |  az login --service-principal -t $(tenant_id) -u $(client_id) -p $(client_secret)
+            az account set -s $(subscription_id)
+            az group delete --name $(backend_azure_rg_name) --yes

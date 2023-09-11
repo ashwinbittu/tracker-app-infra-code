@@ -1,0 +1,96 @@
+trigger:
+- main
+
+resources:
+  pipelines:
+  - pipeline: TrackerApp-AKS-Infra-Create_Trigger
+    source: TrackerApp-AKS-Infra-Create
+    project: trackeraks
+    trigger: true
+
+pool:
+  name: Default
+  demands:
+   - agent.name -equals ado-agent1-vm 
+
+variables:
+- group: dev_variables
+
+stages:     
+- stage: ModifyFiles
+  jobs:
+    - job: ModifyFilesJob
+      continueOnError: false
+      steps:
+      - task: Bash@3
+        displayName: Changing SonarQube Service Type from ClusterIP to LoadBalancer
+        inputs:
+          targetType: 'inline'
+          script: |
+            sleep 60
+            rm -rf /home/azdoagent/.kube/config #only needed if kubeconfig updation creates conflicts, this is specific to my pipeline agent, may not be neccessary for others.
+            #kubectl config view
+            #echo "############"
+            echo y | az aks get-credentials --name $(aks_cluster_name) --resource-group $(devops_rg_name)
+            #echo "***********"
+            #kubectl config view
+            #kubectl config current-context
+            #kubectl -n argocd get pods
+            kubectl -n sonarqube patch svc sonarqube-sonarqube -p '{"spec": {"type": "LoadBalancer"}}' 
+      - task: KubernetesManifest@0
+        displayName: Create Argo CD Image Updater Secret For Pulling Images in default NS
+        inputs:
+          action: 'createSecret'
+          kubernetesServiceConnection: '$(aksServiceConnection)'
+          namespace: 'default'
+          secretType: 'dockerRegistry'
+          secretName: '$(imagePullSecret)'
+          dockerRegistryEndpoint: '$(dockerRegistryServiceConnection)'
+      - task: KubernetesManifest@0
+        displayName: Create Argo CD Image Updater Secret For Pushing GIT tags
+        inputs:
+          action: 'createSecret'
+          kubernetesServiceConnection: '$(aksServiceConnection)'
+          namespace: 'argocd'
+          secretType: 'dockerRegistry'
+          secretName: 'azuredeveops-acr-secret-pipeline'
+          dockerRegistryEndpoint: '$(dockerRegistryServiceConnection)'
+
+      - task: KubernetesManifest@0
+        displayName: Create Argo CD Image Updater Secret For Pulling Images in argocd ns
+        inputs:
+          action: 'createSecret'
+          kubernetesServiceConnection: '$(aksServiceConnection)'
+          namespace: 'argocd'
+          secretType: 'generic'
+          secretName: 'azuredeveops-repo-pipeline'
+          secretArguments: '--from-literal=username=argocd --from-literal=password=$(personal_access_token)'
+      - task: Bash@3
+        displayName: Create Azure DevOpsRepo To ArgoCD Mapping Secret
+        inputs:
+          targetType: 'inline'
+          script: |
+            #echo "############"
+            #echo y | az aks get-credentials --name $(aks_cluster_name) --resource-group $(devops_rg_name)
+            #echo "***********"
+            echo url='https://$(devops_org_name)@dev.azure.com/$(devops_org_name)/$(devops_prj_name)/_git/trackerapp-k8s-manifests' >> tempfile.txt
+            echo password='$(personal_access_token)' >> tempfile.txt
+            echo username='argocd' >> tempfile.txt
+            kubectl -n argocd create secret generic azuredeveops-repo --from-env-file=tempfile.txt
+            kubectl -n argocd label secret azuredeveops-repo "argocd.argoproj.io/secret-type=repository"
+      - task: Bash@3
+        displayName: Update Argo CD Image Updater, Reconciliation ConfigMap & SVC
+        inputs:
+          targetType: 'inline'
+          script: |
+            sleep 60
+            #kubectl config view
+            #echo "############"
+            #echo y | az aks get-credentials --name $(aks_cluster_name) --resource-group $(devops_rg_name)
+            #echo "***********"
+            kubectl -n argocd patch svc argocd-server -p '{"spec": {"type": "LoadBalancer"}}' 
+            kubectl -n argocd patch configmap argocd-cm -p '{"data": {"timeout.reconciliation": "1s"}}' 
+            kubectl -n argocd patch configmap argocd-image-updater-config -p '{ "data": { "argocd.grpc_web": "true", "argocd.insecure": "false", "argocd.plaintext": "false", "kube.events": "false", "log.level": "debug", "registries.conf": "registries:\n- name: Azure Container Registry\n  prefix: $(acr_reg_name).azurecr.io\n  api_url: https://$(acr_reg_name).azurecr.io\n  credentials: pullsecret:argocd/azuredeveops-acr-secret-pipeline\n" }}'
+            kubectl -n argocd patch deployment argocd-application-controller -p '{ "spec": {  "template": {  "spec": { "containers": [ { "name": "application-controller", "env": [ { "name": "ARGOCD_RECONCILIATION_TIMEOUT",  "value": "1s" }, {  "name": "ARGOCD_HARD_RECONCILIATION_TIMEOUT",  "value": "1s" } ] } ] } } } }'
+            kubectl -n argocd rollout restart deployment updater-argocd-image-updater
+            kubectl -n argocd rollout restart deploy argocd-repo-server
